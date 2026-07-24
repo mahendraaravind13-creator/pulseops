@@ -1,0 +1,8 @@
+# Java build artifacts 
+target/ 
+*.class 
+# Environment variables 
+.env 
+# IDE files 
+.idea/ 
+*.iml 
