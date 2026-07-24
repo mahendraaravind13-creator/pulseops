@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL: Our primary database for tenant isolation
+  postgres:
+    image: postgres:15
+    container_name: pulseops-db
+    environment:
+      POSTGRES_USER: pulseops
+      POSTGRES_PASSWORD: qpalzm
+      POSTGRES_DB: pulseops_db
+    ports:
+      - "5432:5432"
+
+  # 2. Redis: In-memory cache for high-speed AI baseline lookups
+  redis:
+    image: redis:7-alpine
+    container_name: pulseops-cache
+    ports:
+      - "6379:6379"
+
+  # 3. Apache Kafka: The high-speed event streaming bus for server logs
+  kafka:
+    image: confluentinc/confluent-local:7.5.0
+    container_name: pulseops-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'

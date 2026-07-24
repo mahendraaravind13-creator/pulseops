@@ -1,0 +1,9 @@
+com\pulseops\ingestor\IngestorApplication.class
+com\pulseops\ingestor\SecurityConfig.class
+com\pulseops\ingestor\repository\TenantRepository.class
+com\pulseops\ingestor\controller\TelemetryController.class
+com\pulseops\ingestor\controller\AuthController.class
+com\pulseops\ingestor\repository\TelemetryRepository.class
+com\pulseops\ingestor\controller\MetricsController.class
+com\pulseops\ingestor\model\Tenant.class
+com\pulseops\ingestor\model\TelemetryEvent.class
