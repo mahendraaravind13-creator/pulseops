@@ -1,8 +1,24 @@
-# Java build artifacts 
-target/ 
-*.class 
-# Environment variables 
-.env 
-# IDE files 
-.idea/ 
-*.iml 
+# Build output
+target/
+*.class
+dist/
+node_modules/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local data
+*.db
+*.log

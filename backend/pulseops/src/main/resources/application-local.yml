@@ -1,0 +1,5 @@
+# Local development profile: `mvn spring-boot:run -Dspring-boot.run.profiles=local`
+# Provides a throwaway JWT secret so the app starts without a .env file. Never use it outside your machine.
+pulseops:
+  jwt:
+    secret: local-dev-only-secret-change-me-0123456789abcdef

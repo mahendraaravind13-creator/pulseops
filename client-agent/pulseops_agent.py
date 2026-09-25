@@ -1,113 +1,92 @@
 #!/usr/bin/env python3
 """
-PulseOps Monitoring Agent
-=========================
-Run this on any server to start sending metrics to PulseOps.
+PulseOps agent: reports this machine's CPU, memory and disk usage to PulseOps.
 
-Usage:
-    python pulseops_agent.py \
-        --api-key pk_your_key_here \
-        --service-name my-app \
-        --ingestor http://localhost:8080
+    pip install -r requirements.txt
+    python pulseops_agent.py --api-key pk_... --service checkout-api --url http://localhost:8088
 
-Install dependency:
-    pip install psutil requests
+The agent only reports numbers. It never decides whether something is wrong; alert rules on the
+server do that. It sends `recordedAt` with every sample, so a retried request is recognised as a
+duplicate by the server instead of being counted twice.
 """
 
 import argparse
-import time
-import requests
-import psutil
+import random
 import socket
-from datetime import datetime
+import sys
+import time
+from datetime import datetime, timezone
 
-def get_metrics(service_name):
-    """Read real system metrics from the operating system."""
-    cpu    = psutil.cpu_percent(interval=1)
-    memory = psutil.virtual_memory().percent
-    disk   = psutil.disk_usage('/').percent
+import psutil
+import requests
 
-    # Determine status based on thresholds
-    if cpu > 85 or memory > 85:
-        status = "CRITICAL"
-    elif cpu > 70 or memory > 70:
-        status = "WARNING"
-    else:
-        status = "HEALTHY"
 
+def read_sample(service: str) -> dict:
     return {
-        "serviceName":  service_name,
-        "cpuUsage":     round(cpu, 1),
-        "memoryUsage":  round(memory, 1),
-        "diskUsage":    round(disk, 1),
-        "status":       status,
-        "hostname":     socket.gethostname(),
-        "timestamp":    datetime.utcnow().isoformat()
+        "service": service,
+        "hostname": socket.gethostname(),
+        "cpu": round(psutil.cpu_percent(interval=1), 1),
+        "memory": round(psutil.virtual_memory().percent, 1),
+        "disk": round(psutil.disk_usage("C:\\" if sys.platform == "win32" else "/").percent, 1),
+        "recordedAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
     }
 
-def send_metrics(payload, api_key, ingestor_url):
-    """Send metrics to PulseOps ingestor with API key authentication."""
-    try:
-        response = requests.post(
-            f"{ingestor_url}/api/v1/telemetry",
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "X-API-Key":    api_key
-            },
-            timeout=5
-        )
-        if response.status_code == 200:
-            print(f"✅ [{payload['status']}] CPU: {payload['cpuUsage']}% "
-                  f"| MEM: {payload['memoryUsage']}% "
-                  f"| {payload['serviceName']}")
-        elif response.status_code == 401:
-            print(f"❌ Invalid API key. Check your key and try again.")
-            exit(1)
-        else:
-            print(f"⚠️  Server returned {response.status_code}: {response.text}")
-    except requests.exceptions.ConnectionError:
-        print(f"⚠️  Cannot reach PulseOps at {ingestor_url} — retrying in 10s")
-    except Exception as e:
-        print(f"⚠️  Error: {e}")
 
-def main():
-    parser = argparse.ArgumentParser(description='PulseOps Monitoring Agent')
-    parser.add_argument('--api-key',      required=True,  help='Your PulseOps API key')
-    parser.add_argument('--service-name', required=True,  help='Name of this service')
-    parser.add_argument('--ingestor',     required=True,  help='PulseOps ingestor URL')
-    parser.add_argument('--interval',     type=int, default=10, help='Seconds between reports')
+def send(session: requests.Session, url: str, api_key: str, sample: dict, max_attempts: int = 4) -> None:
+    """POST one sample. Retries network errors, 5xx and 429 with backoff; gives up on other 4xx."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = session.post(f"{url}/api/v1/ingest", json=sample,
+                                    headers={"X-API-Key": api_key}, timeout=5)
+        except requests.RequestException as error:
+            wait = backoff(attempt)
+            print(f"  network error ({error.__class__.__name__}), retrying in {wait:.1f}s")
+            time.sleep(wait)
+            continue
+
+        if response.status_code == 202:
+            print(f"  sent  cpu={sample['cpu']:5.1f}%  mem={sample['memory']:5.1f}%  disk={sample['disk']:5.1f}%")
+            return
+        if response.status_code == 401:
+            sys.exit("Invalid API key. Copy it from Settings in the PulseOps dashboard.")
+        if response.status_code == 429:
+            wait = float(response.headers.get("Retry-After", backoff(attempt)))
+            print(f"  rate limited, waiting {wait:.0f}s")
+            time.sleep(wait)
+            continue
+        if response.status_code >= 500:
+            wait = float(response.headers.get("Retry-After", backoff(attempt)))
+            print(f"  server unavailable ({response.status_code}), retrying in {wait:.1f}s")
+            time.sleep(wait)
+            continue
+        print(f"  rejected ({response.status_code}): {response.text[:200]}")
+        return
+    print("  giving up on this sample after retries")
+
+
+def backoff(attempt: int) -> float:
+    """Exponential backoff with jitter: about 1s, 2s, 4s, 8s."""
+    return min(2 ** (attempt - 1), 30) + random.uniform(0, 0.5)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="PulseOps monitoring agent")
+    parser.add_argument("--api-key", required=True, help="tenant API key (pk_...)")
+    parser.add_argument("--service", required=True, help="name of the service running on this host")
+    parser.add_argument("--url", default="http://localhost:8088", help="PulseOps base URL")
+    parser.add_argument("--interval", type=int, default=10, help="seconds between samples")
     args = parser.parse_args()
 
-    print(f"🚀 PulseOps Agent started")
-    print(f"   Service  : {args.service_name}")
-    print(f"   Ingestor : {args.ingestor}")
-    print(f"   Interval : every {args.interval} seconds")
-    print(f"   API Key  : {args.api_key[:8]}...{args.api_key[-4:]}")
-    print()
-
-    # Test connection first
-    try:
-        r = requests.get(
-            f"{args.ingestor}/api/v1/telemetry/health",
-            headers={"X-API-Key": args.api_key},
-            timeout=5
-        )
-        if r.status_code == 200:
-            print(f"Connection verified: {r.text}")
-        elif r.status_code == 401:
-            print("Invalid API key. Get your key from pulseops.io")
-            exit(1)
-    except Exception:
-        print(f"Could not reach {args.ingestor} — will keep retrying")
-
-    print()
-
-    # Main monitoring loop
+    print(f"PulseOps agent: service={args.service} url={args.url} every {args.interval}s (Ctrl+C to stop)")
+    session = requests.Session()
     while True:
-        payload = get_metrics(args.service_name)
-        send_metrics(payload, args.api_key, args.ingestor)
-        time.sleep(args.interval)
+        started = time.monotonic()
+        send(session, args.url.rstrip("/"), args.api_key, read_sample(args.service))
+        time.sleep(max(0.0, args.interval - (time.monotonic() - started)))
 
-if __name__ == '__main__':
-    main()
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nstopped")
