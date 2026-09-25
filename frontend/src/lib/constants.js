@@ -27,6 +27,9 @@ export const TIME_RANGES = [
 
 export const DEFAULT_PAGE_SIZE = 20
 
+// The agent must talk to whichever origin serves this dashboard (localhost in development, the public
+// hostname when deployed), so the URL is read from the page instead of being hard-coded.
 export function agentInstallCommand(apiKey = '<your-api-key>') {
-  return `python pulseops_agent.py --api-key ${apiKey} --service checkout-api --url http://localhost:8088`
+  const url = typeof window === 'undefined' ? 'http://localhost:8088' : window.location.origin
+  return `python pulseops_agent.py --api-key ${apiKey} --service checkout-api --url ${url}`
 }

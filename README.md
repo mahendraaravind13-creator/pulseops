@@ -363,6 +363,8 @@ Numbers from real runs, not estimates. Details and reproduction steps are in the
 
 ## Run it
 
+A deployed instance runs at **https://pulseops.atlas-theproject.duckdns.org** on a single 1 GB EC2 instance; [deploy/DEPLOY.md](deploy/DEPLOY.md) describes that setup and what it changes from the stack below.
+
 **Prerequisite:** Docker Desktop.
 
 ```bash

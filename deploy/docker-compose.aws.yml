@@ -1,0 +1,134 @@
+# PulseOps on one small EC2 instance (t3.micro: 2 vCPU, 1 GB RAM, 4 GB swap) that it shares with another
+# project. That neighbour's Caddy container owns ports 80 and 443 and terminates TLS; PulseOps is a second
+# site behind it. See DEPLOY.md next to this file.
+#
+#   docker compose -f docker-compose.aws.yml --env-file .env.aws up -d
+#
+# Every difference from the root docker-compose.yml exists because of the 1 GB of RAM:
+#   - apache/kafka-native: the same broker compiled with GraalVM. About 175 MB resident instead of ~1 GB.
+#   - one app replica instead of two. Nothing else changes; `--scale app=2` works again on a bigger box.
+#   - a memory limit on every container, so a PulseOps spike cannot starve the neighbour (or vice versa).
+#   - a smaller JVM heap, the serial collector and C1-only JIT for the app.
+#   - images are built on a developer machine and shipped with `docker save | ssh | docker load`.
+#     Maven plus a JDK in 1 GB either swaps for twenty minutes or gets OOM-killed.
+#   - no host ports at all. Only Caddy reaches nginx, over the neighbour's Docker network.
+
+name: pulseops
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pulseops
+      POSTGRES_USER: pulseops
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env.aws}
+    # Keeps Postgres to roughly 50 MB resident. One app instance uses at most DB_POOL_SIZE connections.
+    command: postgres -c shared_buffers=32MB -c max_connections=30 -c effective_cache_size=96MB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulseops -d pulseops"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 12
+    mem_limit: 160m
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Everything PulseOps keeps in Redis has a TTL, so volatile-lru can only ever evict something that
+    # would have expired anyway. In practice usage stays far below the cap.
+    command: redis-server --maxmemory 32mb --maxmemory-policy volatile-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 64m
+    restart: unless-stopped
+
+  # Same KRaft configuration as the root compose file; only the image and the health check differ.
+  # The native image has no JVM and no shell scripts, so readiness is "the internal listener accepts TCP".
+  kafka:
+    image: apache/kafka-native:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:19092,CONTROLLER://:9093,HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # topics are declared by the app (KafkaConfig)
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 19092"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 12
+    mem_limit: 320m
+    restart: unless-stopped
+
+  app:
+    image: pulseops-app:${PULSEOPS_TAG:?Set PULSEOPS_TAG in .env.aws (the git short sha that was built)}
+    # Overrides the image's entrypoint only to size the JVM for a 512 MB cgroup:
+    # heap <= 256 MB, serial GC (smallest footprint, fine for this traffic), C1-only JIT (less memory and CPU).
+    entrypoint: ["java", "-XX:MaxRAMPercentage=50", "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1", "-jar", "app.jar"]
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/pulseops
+      DB_USER: pulseops
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_POOL_SIZE: "5"
+      REDIS_HOST: redis
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.aws (at least 32 characters)}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-lite-latest}
+      # Same origin as the dashboard, so the browser never sends a cross-origin request; set for completeness.
+      CORS_ALLOWED_ORIGINS: ${PULSEOPS_PUBLIC_URL:?Set PULSEOPS_PUBLIC_URL in .env.aws}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q UP"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s   # a cold JVM start on a burstable instance that is already swapping takes a while
+      retries: 8
+    mem_limit: 512m
+    restart: unless-stopped
+
+  # nginx: serves the React build and proxies /api to the app (frontend/nginx.conf, unchanged).
+  # Named pulseops-web, not web: Compose registers the service name in DNS on every network the container
+  # joins, and the neighbour already has a service called "web" on the shared network.
+  pulseops-web:
+    image: pulseops-web:${PULSEOPS_TAG}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      default:
+      edge:
+    mem_limit: 32m
+    restart: unless-stopped
+
+networks:
+  # The neighbour's Compose network, where its Caddy container lives. Caddy proxies
+  # https://<pulseops hostname> to pulseops-web:80 on this network.
+  edge:
+    name: atlas_default
+    external: true
+
+volumes:
+  postgres_data:
